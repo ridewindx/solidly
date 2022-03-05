@@ -46,6 +46,7 @@ interface VotingEscrow {
     function token() external view returns (address);
 }
 
+// ve 分发合约，将收到的 $SOLID 按每个 tokenId 的投票权数量占总投票权数量的百分比来给其分发收益，并直接 deposit 给 ve 合约
 contract ve_dist {
 
     event CheckpointToken(
@@ -62,24 +63,24 @@ contract ve_dist {
 
     uint constant WEEK = 7 * 86400;
 
-    uint public start_time;
-    uint public time_cursor;
+    uint public start_time; // 此合约部署时的周四零点
+    uint public time_cursor; // 每次整理投票权数量的最新周四零点
     mapping(uint => uint) public time_cursor_of;
     mapping(uint => uint) public user_epoch_of;
 
-    uint public last_token_time;
-    uint[1000000000000000] public tokens_per_week;
+    uint public last_token_time; // 上次更新 tokens_per_week 的时刻
+    uint[1000000000000000] public tokens_per_week; // 索引是周四零点时间戳，元素值是这周要分发的 $SOLID 数量
 
     address public voting_escrow;
     address public token;
-    uint public token_last_balance;
+    uint public token_last_balance; // 上次的此合约拥有 $SOLID 总余额
 
-    uint[1000000000000000] public ve_supply;
+    uint[1000000000000000] public ve_supply; // 索引是周四零点时间戳，元素值为投票权总数量
 
     address public depositor;
 
     constructor(address _voting_escrow) {
-        uint _t = block.timestamp / WEEK * WEEK;
+        uint _t = block.timestamp / WEEK * WEEK; // 周四零点
         start_time = _t;
         last_token_time = _t;
         time_cursor = _t;
@@ -90,13 +91,15 @@ contract ve_dist {
         erc20(_token).approve(_voting_escrow, type(uint).max);
     }
 
+    // 当前时间的取整周四零点的时间戳
     function timestamp() external view returns (uint) {
         return block.timestamp / WEEK * WEEK;
     }
 
+    // 计算从上次到现在这段时间的每周应分发的 $SOLID 数量（按时间均分）
     function _checkpoint_token() internal {
         uint token_balance = erc20(token).balanceOf(address(this));
-        uint to_distribute = token_balance - token_last_balance;
+        uint to_distribute = token_balance - token_last_balance; // 新增的 $SOLID 数量
         token_last_balance = token_balance;
 
         uint t = last_token_time;
@@ -128,7 +131,7 @@ contract ve_dist {
     }
 
     function checkpoint_token() external {
-        assert(msg.sender == depositor);
+        assert(msg.sender == depositor); // 只有 depositor 能调用
         _checkpoint_token();
     }
 
@@ -164,6 +167,7 @@ contract ve_dist {
         return _min;
     }
 
+    // tokenId 在指定时刻的投票权数量
     function ve_for_at(uint _tokenId, uint _timestamp) external view returns (uint) {
         address ve = voting_escrow;
         uint max_user_epoch = VotingEscrow(ve).user_point_epoch(_tokenId);
@@ -174,10 +178,11 @@ contract ve_dist {
 
     function _checkpoint_total_supply() internal {
         address ve = voting_escrow;
-        uint t = time_cursor;
-        uint rounded_timestamp = block.timestamp / WEEK * WEEK;
-        VotingEscrow(ve).checkpoint();
+        uint t = time_cursor; // 周四零点
+        uint rounded_timestamp = block.timestamp / WEEK * WEEK; // 周四零点
+        VotingEscrow(ve).checkpoint(); // 整理新的检查点历史
 
+        // 计算上次 time_cursor 到最近的周四零点的每周的投票权总数量
         for (uint i = 0; i < 20; i++) {
             if (t > rounded_timestamp) {
                 break;
@@ -206,7 +211,7 @@ contract ve_dist {
         uint max_user_epoch = VotingEscrow(ve).user_point_epoch(_tokenId);
         uint _start_time = start_time;
 
-        if (max_user_epoch == 0) return 0;
+        if (max_user_epoch == 0) return 0; // 没有锁定到 ve，则不能申领 $SOLID 收益
 
         uint week_cursor = time_cursor_of[_tokenId];
         if (week_cursor == 0) {
@@ -219,6 +224,7 @@ contract ve_dist {
 
         VotingEscrow.Point memory user_point = VotingEscrow(ve).user_point_history(_tokenId, user_epoch);
 
+        // 整周时间戳游标
         if (week_cursor == 0) week_cursor = (user_point.ts + WEEK - 1) / WEEK * WEEK;
         if (week_cursor >= last_token_time) return 0;
         if (week_cursor < _start_time) week_cursor = _start_time;
@@ -241,6 +247,7 @@ contract ve_dist {
                 uint balance_of = Math.max(uint(int256(old_user_point.bias - dt * old_user_point.slope)), 0);
                 if (balance_of == 0 && user_epoch > max_user_epoch) break;
                 if (balance_of > 0) {
+                    // 根据此 tokenId 投票权数量占总投票权数量的占比来计算其 $SOLID 收益
                     to_distribute += balance_of * tokens_per_week[week_cursor] / ve_supply[week_cursor];
                 }
                 week_cursor += WEEK;
@@ -313,11 +320,11 @@ contract ve_dist {
     }
 
     function claim(uint _tokenId) external returns (uint) {
-        if (block.timestamp >= time_cursor) _checkpoint_total_supply();
+        if (block.timestamp >= time_cursor) _checkpoint_total_supply(); // 整理投票权总数量检查点历史
         uint _last_token_time = last_token_time;
         _last_token_time = _last_token_time / WEEK * WEEK;
         uint amount = _claim(_tokenId, voting_escrow, _last_token_time);
-        if (amount != 0) {
+        if (amount != 0) { // claim 得到的 $SOLID，直接 deposit 到 ve
             VotingEscrow(voting_escrow).deposit_for(_tokenId, amount);
             token_last_balance -= amount;
         }

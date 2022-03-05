@@ -34,6 +34,7 @@ interface IBaseV1Callee {
 }
 
 // Base V1 Fees contract is used as a 1:1 pair relationship to split out fees, this ensures that the curve does not need to be modified for LP shares
+// 辅助 pair 进行费用管理，总是把费用存入此合约，由此合约分发
 contract BaseV1Fees {
 
     address internal immutable pair; // The pair it is bonded to
@@ -86,7 +87,7 @@ contract BaseV1Pair {
 
     address public immutable token0;
     address public immutable token1;
-    address public immutable fees;
+    address public immutable fees; // BaseV1Fees 合约地址
     address immutable factory;
 
     // Structure to capture time period obervations every 30 minutes, used for local oracles
@@ -146,6 +147,7 @@ contract BaseV1Pair {
         (address _token0, address _token1, bool _stable) = BaseV1Factory(msg.sender).getInitializable();
         (token0, token1, stable) = (_token0, _token1, _stable);
         fees = address(new BaseV1Fees(_token0, _token1));
+        // 注意 pair token 的名字和符号是怎么构造的
         if (_stable) {
             name = string(abi.encodePacked("StableV1 AMM - ", erc20(_token0).symbol(), "/", erc20(_token1).symbol()));
             symbol = string(abi.encodePacked("sAMM-", erc20(_token0).symbol(), "/", erc20(_token1).symbol()));
@@ -160,7 +162,7 @@ contract BaseV1Pair {
         observations.push(Observation(block.timestamp, 0, 0));
     }
 
-    // simple re-entrancy check
+    // simple re-entrancy check 防重入锁
     uint internal _unlocked = 1;
     modifier lock() {
         require(_unlocked == 1);
@@ -204,7 +206,7 @@ contract BaseV1Pair {
 
     // Accrue fees on token0
     function _update0(uint amount) internal {
-        _safeTransfer(token0, fees, amount); // transfer the fees out to BaseV1Fees
+        _safeTransfer(token0, fees, amount); // transfer the fees out to BaseV1Fees 把费用转账给 fees 合约
         uint256 _ratio = amount * 1e18 / totalSupply; // 1e18 adjustment is removed during claim
         if (_ratio > 0) {
             index0 += _ratio;
@@ -224,6 +226,7 @@ contract BaseV1Pair {
 
     // this function MUST be called on any balance changes, otherwise can be used to infinitely claim fees
     // Fees are segregated from core funds, so fees can never put liquidity at risk
+    // 为 recipient 更新计算可提取的 token0 和 token1 费用的数额
     function _updateFor(address recipient) internal {
         uint _supplied = balanceOf[recipient]; // get LP balance of `recipient`
         if (_supplied > 0) {
@@ -348,6 +351,8 @@ contract BaseV1Pair {
         uint _amount0 = _balance0 - _reserve0;
         uint _amount1 = _balance1 - _reserve1;
 
+        // 注意这里没有 UniswapV2 中的 mintFee，也就是不会增发 liquidity 给 feeTo
+
         uint _totalSupply = totalSupply; // gas savings, must be defined here since totalSupply can update in _mintFee
         if (_totalSupply == 0) {
             liquidity = Math.sqrt(_amount0 * _amount1) - MINIMUM_LIQUIDITY;
@@ -408,6 +413,7 @@ contract BaseV1Pair {
         require(amount0In > 0 || amount1In > 0, 'IIA'); // BaseV1: INSUFFICIENT_INPUT_AMOUNT
         { // scope for reserve{0,1}Adjusted, avoids stack too deep errors
         (address _token0, address _token1) = (token0, token1);
+        // 收取 1/10000 的费用
         if (amount0In > 0) _update0(amount0In / 10000); // accrue fees for token0 and move them out of pool
         if (amount1In > 0) _update1(amount1In / 10000); // accrue fees for token1 and move them out of pool
         _balance0 = erc20(_token0).balanceOf(address(this)); // since we removed tokens, we need to reconfirm balances, can also simply use previous balance - amountIn/ 10000, but doing balanceOf again as safety check
@@ -466,6 +472,7 @@ contract BaseV1Pair {
 
     function getAmountOut(uint amountIn, address tokenIn) external view returns (uint) {
         (uint _reserve0, uint _reserve1) = (reserve0, reserve1);
+        // 从 amountIn 扣除 1/10000 的费用
         amountIn -= amountIn / 10000; // remove fee from amount received
         return _getAmountOut(amountIn, tokenIn, _reserve0, _reserve1);
     }
@@ -486,13 +493,13 @@ contract BaseV1Pair {
     }
 
     function _k(uint x, uint y) internal view returns (uint) {
-        if (stable) {
+        if (stable) { // 稳定币
             uint _x = x * 1e18 / decimals0;
             uint _y = y * 1e18 / decimals1;
             uint _a = (_x * _y) / 1e18;
             uint _b = ((_x * _x) / 1e18 + (_y * _y) / 1e18);
-            return _a * _b / 1e18;  // x3y+y3x >= k
-        } else {
+            return _a * _b / 1e18;  // x3y+y3x >= k -> xy(x^2+y^2) >= k
+        } else { // 非稳定币
             return x * y; // xy >= k
         }
     }
@@ -583,7 +590,7 @@ contract BaseV1Pair {
 
 contract BaseV1Factory {
 
-    bool public isPaused;
+    bool public isPaused; // 若为 true，则任何 pair 的 swap 都会被暂停
     address public pauser;
     address public pendingPauser;
 
@@ -635,8 +642,8 @@ contract BaseV1Factory {
         require(token0 != address(0), 'ZA'); // BaseV1: ZERO_ADDRESS
         require(getPair[token0][token1][stable] == address(0), 'PE'); // BaseV1: PAIR_EXISTS - single check is sufficient
         bytes32 salt = keccak256(abi.encodePacked(token0, token1, stable)); // notice salt includes stable as well, 3 parameters
-        (_temp0, _temp1, _temp) = (token0, token1, stable);
-        pair = address(new BaseV1Pair{salt:salt}());
+        (_temp0, _temp1, _temp) = (token0, token1, stable); // BaseV1Pair 的构造函数中会用到这 3 个
+        pair = address(new BaseV1Pair{salt:salt}()); // 注意 salt
         getPair[token0][token1][stable] = pair;
         getPair[token1][token0][stable] = pair; // populate mapping in the reverse direction
         allPairs.push(pair);

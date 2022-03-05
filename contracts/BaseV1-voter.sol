@@ -65,24 +65,24 @@ contract BaseV1Voter {
 
     address public immutable _ve; // the ve token that governs these contracts
     address public immutable factory; // the BaseV1Factory
-    address internal immutable base;
+    address internal immutable base; // $SOLID 代币合约的地址
     address public immutable gaugefactory;
     address public immutable bribefactory;
     uint internal constant DURATION = 7 days; // rewards are released over 7 days
     address public minter;
 
-    uint public totalWeight; // total voting weight
+    uint public totalWeight; // total voting weight 所有投票数量的总和（包括反对票）
 
-    address[] public pools; // all pools viable for incentives
-    mapping(address => address) public gauges; // pool => gauge
+    address[] public pools; // all pools viable for incentives 所有允许的 pool token 合约地址们
+    mapping(address => address) public gauges; // pool => gauge 一一对应
     mapping(address => address) public poolForGauge; // gauge => pool
-    mapping(address => address) public bribes; // gauge => bribe
-    mapping(address => int256) public weights; // pool => weight
-    mapping(uint => mapping(address => int256)) public votes; // nft => pool => votes
-    mapping(uint => address[]) public poolVote; // nft => pools
-    mapping(uint => uint) public usedWeights;  // nft => total voting weight of user
+    mapping(address => address) public bribes; // gauge => bribe 一一对应
+    mapping(address => int256) public weights; // pool => weight 每个 pool 获得的投票数量
+    mapping(uint => mapping(address => int256)) public votes; // nft tokenId => pool => votes
+    mapping(uint => address[]) public poolVote; // nft tokenId => pools（此 tokenId 投票的 pool 们）
+    mapping(uint => uint) public usedWeights;  // nft tokenId => total voting weight of user 此 tokenId 投出的投票数量（包括反对票）
     mapping(address => bool) public isGauge;
-    mapping(address => bool) public isWhitelisted;
+    mapping(address => bool) public isWhitelisted; // 被白名单的 token 合约地址们；添加的 pool token 的两个 token 必须是被白名单的
 
     event GaugeCreated(address indexed gauge, address creator, address indexed bribe, address indexed pool);
     event Voted(address indexed voter, uint tokenId, int256 weight);
@@ -106,7 +106,7 @@ contract BaseV1Voter {
 
     // simple re-entrancy check
     uint internal _unlocked = 1;
-    modifier lock() {
+    modifier lock() { // 防重入锁
         require(_unlocked == 1);
         _unlocked = 2;
         _;
@@ -121,14 +121,17 @@ contract BaseV1Voter {
         minter = _minter;
     }
 
+    // 将某 token 添加到白名单所需要的上架费 $SOLID 数量
+    // 为 $SOLID 流通量的 1/200
     function listing_fee() public view returns (uint) {
         return (erc20(base).totalSupply() - erc20(_ve).totalSupply()) / 200;
     }
 
+    // 取消此 tokenId 的所有投票
     function reset(uint _tokenId) external {
         require(ve(_ve).isApprovedOrOwner(msg.sender, _tokenId));
         _reset(_tokenId);
-        ve(_ve).abstain(_tokenId);
+        ve(_ve).abstain(_tokenId); // 向 ve 表明取消此 tokenId 的投票
     }
 
     function _reset(uint _tokenId) internal {
@@ -158,6 +161,7 @@ contract BaseV1Voter {
         delete poolVote[_tokenId];
     }
 
+    // 投票，其实是根据此 tokenId 最新的持有投票权数量情况，把已投的票进行重新整理（每个 pool 的占比不变）
     function poke(uint _tokenId) external {
         address[] memory _poolVote = poolVote[_tokenId];
         uint _poolCnt = _poolVote.length;
@@ -171,13 +175,14 @@ contract BaseV1Voter {
     }
 
     function _vote(uint _tokenId, address[] memory _poolVote, int256[] memory _weights) internal {
-        _reset(_tokenId);
+        _reset(_tokenId); // 先取消此 tokenId 的所有投票
         uint _poolCnt = _poolVote.length;
-        int256 _weight = int256(ve(_ve).balanceOfNFT(_tokenId));
+        int256 _weight = int256(ve(_ve).balanceOfNFT(_tokenId)); // 此 tokenId 拥有的投票权数量
         int256 _totalVoteWeight = 0;
         int256 _totalWeight = 0;
         int256 _usedWeight = 0;
 
+        // 你对你投票的所有 pool 的投票权重的总和
         for (uint i = 0; i < _poolCnt; i++) {
             _totalVoteWeight += _weights[i] > 0 ? _weights[i] : -_weights[i];
         }
@@ -187,15 +192,16 @@ contract BaseV1Voter {
             address _gauge = gauges[_pool];
 
             if (isGauge[_gauge]) {
+                // 把你的投票权数量按你对 pool 们的投票权重来分配
                 int256 _poolWeight = _weights[i] * _weight / _totalVoteWeight;
                 require(votes[_tokenId][_pool] == 0);
-                require(_poolWeight != 0);
+                require(_poolWeight != 0); // 对每个 pool 的投票权数量不能为 0
                 _updateFor(_gauge);
 
                 poolVote[_tokenId].push(_pool);
 
-                weights[_pool] += _poolWeight;
-                votes[_tokenId][_pool] += _poolWeight;
+                weights[_pool] += _poolWeight; // 若是反对票，则会减少
+                votes[_tokenId][_pool] += _poolWeight; // 若是反对票，则会减少
                 if (_poolWeight > 0) {
                     IBribe(bribes[_gauge])._deposit(uint256(_poolWeight), _tokenId);
                 } else {
@@ -206,22 +212,28 @@ contract BaseV1Voter {
                 emit Voted(msg.sender, _tokenId, _poolWeight);
             }
         }
-        if (_usedWeight > 0) ve(_ve).voting(_tokenId);
+        if (_usedWeight > 0) ve(_ve).voting(_tokenId); // 向 ve 表明 tokenId 投票了
         totalWeight += uint256(_totalWeight);
         usedWeights[_tokenId] = uint256(_usedWeight);
     }
 
+    // 使用 tokenId 的投票权数量对指定的 pool 们进行投票
+    // 这里的 _weights 决定了投票权数量对指定 pool 们的分配比例
+    // _weights 中的元素可以是负的，表示投反对票
     function vote(uint tokenId, address[] calldata _poolVote, int256[] calldata _weights) external {
         require(ve(_ve).isApprovedOrOwner(msg.sender, tokenId));
         require(_poolVote.length == _weights.length);
         _vote(tokenId, _poolVote, _weights);
     }
 
+    // 将指定 token 合约添加到白名单
     function whitelist(address _token, uint _tokenId) public {
         if (_tokenId > 0) {
+            // 若指定了 tokenId，则会看发送者拥有的这个 tokenId 所拥有的投票权数量 > 上架费
             require(msg.sender == ve(_ve).ownerOf(_tokenId));
             require(ve(_ve).balanceOfNFT(_tokenId) > listing_fee());
         } else {
+            // 若没有指定 tokenId，则直接从发送者转账上架费到 minter 合约
             _safeTransferFrom(base, msg.sender, minter, listing_fee());
         }
 
@@ -234,11 +246,12 @@ contract BaseV1Voter {
         emit Whitelisted(msg.sender, _token);
     }
 
+    // 为指定的 pool token 合约创建 gauge
     function createGauge(address _pool) external returns (address) {
         require(gauges[_pool] == address(0x0), "exists");
         require(IBaseV1Factory(factory).isPair(_pool), "!_pool");
         (address tokenA, address tokenB) = IBaseV1Core(_pool).tokens();
-        require(isWhitelisted[tokenA] && isWhitelisted[tokenB], "!whitelisted");
+        require(isWhitelisted[tokenA] && isWhitelisted[tokenB], "!whitelisted"); // pool 的两个 token 必须在白名单里
         address _bribe = IBaseV1BribeFactory(bribefactory).createBribe();
         address _gauge = IBaseV1GaugeFactory(gaugefactory).createGauge(_pool, _bribe, _ve);
         erc20(base).approve(_gauge, type(uint).max);
@@ -253,7 +266,7 @@ contract BaseV1Voter {
     }
 
     function attachTokenToGauge(uint tokenId, address account) external {
-        require(isGauge[msg.sender]);
+        require(isGauge[msg.sender]); // 只能由 gauge 合约调用
         if (tokenId > 0) ve(_ve).attach(tokenId);
         emit Attach(account, msg.sender, tokenId);
     }
@@ -278,12 +291,13 @@ contract BaseV1Voter {
         return pools.length;
     }
 
-    uint internal index;
-    mapping(address => uint) internal supplyIndex;
-    mapping(address => uint) public claimable;
+    uint internal index; // 每个投票可以获得的奖励（乘以了 1e18）
+    mapping(address => uint) internal supplyIndex; // gauge -> gauge's last updated index
+    mapping(address => uint) public claimable; // gauge -> claimable amount
 
+    // 由 minter 合约调用把每周的新发射 $SOLID 数量转入此合约
     function notifyRewardAmount(uint amount) external {
-        _safeTransferFrom(base, msg.sender, address(this), amount); // transfer the distro in
+        _safeTransferFrom(base, msg.sender, address(this), amount); // transfer the distro in 转账 $SOLID 到此合约
         uint256 _ratio = amount * 1e18 / totalWeight; // 1e18 adjustment is removed during claim
         if (_ratio > 0) {
             index += _ratio;
@@ -311,6 +325,7 @@ contract BaseV1Voter {
         _updateFor(_gauge);
     }
 
+    // 更新此 gauge 的可 claim 的 $SOLID 奖励数量
     function _updateFor(address _gauge) internal {
         address _pool = poolForGauge[_gauge];
         int256 _supplied = weights[_pool];
@@ -355,12 +370,13 @@ contract BaseV1Voter {
     }
 
     function distribute(address _gauge) public lock {
-        IMinter(minter).update_period();
+        IMinter(minter).update_period(); // 调用 minter 合约更新计算奖励，并转入到此合约
         _updateFor(_gauge);
         uint _claimable = claimable[_gauge];
+        // 可 claim 的数量必须积累到大于 DURATION
         if (_claimable > IGauge(_gauge).left(base) && _claimable / DURATION > 0) {
             claimable[_gauge] = 0;
-            IGauge(_gauge).notifyRewardAmount(base, _claimable);
+            IGauge(_gauge).notifyRewardAmount(base, _claimable); // 通知 gauge 分发奖励
             emit DistributeReward(msg.sender, _gauge, _claimable);
         }
     }

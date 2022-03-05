@@ -9,6 +9,7 @@ pragma solidity 0.8.11;
 committed to the future of (whatever they are voting for)
 @dev Vote weight decays linearly over time. Lock time cannot be
 more than `MAXTIME` (4 years).
+投票权数量随着时间线性衰减；最大锁定时间为 4 年
 
 # Voting escrow to have time-weighted votes
 # Votes have a weight depending on time, so that users are committed
@@ -316,21 +317,23 @@ interface IERC20 {
     ) external returns (bool);
 }
 
+// voting power = bias - slope * (t - ts)
 struct Point {
-    int128 bias;
-    int128 slope; // # -dweight / dt
-    uint ts;
-    uint blk; // block
+    int128 bias; // 在这个时刻的投票权数量
+    int128 slope; // # -dweight / dt 相对于时间流逝的投票权数量衰减的斜率
+    uint ts; // 区块时间戳
+    uint blk; // block 区块高度
 }
 /* We cannot really do block numbers per se b/c slope is per time, not per block
 * and per block could be fairly bad b/c Ethereum changes blocktimes.
 * What we can do is to extrapolate ***At functions */
 
 struct LockedBalance {
-    int128 amount;
-    uint end;
+    int128 amount; // 对应 nft token 的锁定的 $SOLID 的数量
+    uint end; // 解锁的时刻，应为某个周四零点
 }
 
+// veNFT
 contract ve is IERC721, IERC721Metadata {
     enum DepositType {
         DEPOSIT_FOR_TYPE,
@@ -351,27 +354,27 @@ contract ve is IERC721, IERC721Metadata {
     event Withdraw(address indexed provider, uint tokenId, uint value, uint ts);
     event Supply(uint prevSupply, uint supply);
 
-    uint internal constant WEEK = 1 weeks;
-    uint internal constant MAXTIME = 4 * 365 * 86400;
+    uint internal constant WEEK = 1 weeks; // 一周
+    uint internal constant MAXTIME = 4 * 365 * 86400; // 最多锁定 4 年
     int128 internal constant iMAXTIME = 4 * 365 * 86400;
-    uint internal constant MULTIPLIER = 1 ether;
+    uint internal constant MULTIPLIER = 1 ether; // 一个 ETH，其实只是当作一个很大的数来用
 
     address immutable public token;
-    uint public supply;
-    mapping(uint => LockedBalance) public locked;
+    uint public supply; // 锁定 $SOLID 的总数量
+    mapping(uint => LockedBalance) public locked; // nft tokenId -> LockedBalance
 
     mapping(uint => uint) public ownership_change;
 
-    uint public epoch;
-    mapping(uint => Point) public point_history; // epoch -> unsigned point
-    mapping(uint => Point[1000000000]) public user_point_history; // user -> Point[user_epoch]
+    uint public epoch; // 当前 epoch；从 1 开始
+    mapping(uint => Point) public point_history; // epoch -> unsigned point；从 1 开始到当前 epoch
+    mapping(uint => Point[1000000000]) public user_point_history; // tokenId -> Point[user_epoch]
 
-    mapping(uint => uint) public user_point_epoch;
-    mapping(uint => int128) public slope_changes; // time -> signed slope change
+    mapping(uint => uint) public user_point_epoch; // tokenId -> 当前的 user epoch (每个 tokenId 都有自己的 user epoch 历史，不同于 epoch)
+    mapping(uint => int128) public slope_changes; // time 每个周四零点的时间戳 -> signed slope change 相对于上个周四零点的 slope 变更
 
-    mapping(uint => uint) public attachments;
-    mapping(uint => bool) public voted;
-    address public voter;
+    mapping(uint => uint) public attachments; // tokenId -> attach 的 gauge 个数
+    mapping(uint => bool) public voted; // tokenId -> true/false
+    address public voter; // 投票合约的地址
 
     string constant public name = "veNFT";
     string constant public symbol = "veNFT";
@@ -379,25 +382,25 @@ contract ve is IERC721, IERC721Metadata {
     uint8 constant public decimals = 18;
 
     /// @dev Current count of token
-    uint internal tokenId;
+    uint internal tokenId; // 当前 NFT 数量；加一就是下个 nft tokenId；nft tokenId 从 1 开始
 
     /// @dev Mapping from NFT ID to the address that owns it.
     mapping(uint => address) internal idToOwner;
 
     /// @dev Mapping from NFT ID to approved address.
-    mapping(uint => address) internal idToApprovals;
+    mapping(uint => address) internal idToApprovals; // 一个 NFT 只能有一个直接 approver
 
     /// @dev Mapping from owner address to count of his tokens.
-    mapping(address => uint) internal ownerToNFTokenCount;
+    mapping(address => uint) internal ownerToNFTokenCount; // owner -> his nft count
 
     /// @dev Mapping from owner address to mapping of index to tokenIds
-    mapping(address => mapping(uint => uint)) internal ownerToNFTokenIdList;
+    mapping(address => mapping(uint => uint)) internal ownerToNFTokenIdList; // owner -> nft index in owner's nft list -> nft tokenId; nft index 是从 1 开始；可以列出指定 owner 拥有的所有 nft tokenId 的列表
 
     /// @dev Mapping from NFT ID to index of owner
-    mapping(uint => uint) internal tokenToOwnerIndex;
+    mapping(uint => uint) internal tokenToOwnerIndex; // nft tokenId -> nft index in owner's nft list
 
-    /// @dev Mapping from owner address to mapping of operator addresses.
-    mapping(address => mapping(address => bool)) internal ownerToOperators;
+    /// @dev Mapping from owner address to mapping of operator addresses. 这里的 operator 比 approver 多了可以 approve 的权限
+    mapping(address => mapping(address => bool)) internal ownerToOperators; // owner -> operator -> true/false
 
     /// @dev Mapping of interface id to bool about whether or not it's supported
     mapping(bytes4 => bool) internal supportedInterfaces;
@@ -415,7 +418,7 @@ contract ve is IERC721, IERC721Metadata {
     uint8 internal constant _not_entered = 1;
     uint8 internal constant _entered = 2;
     uint8 internal _entered_state = 1;
-    modifier nonreentrant() {
+    modifier nonreentrant() { // 防重入修饰符
         require(_entered_state == _not_entered);
         _entered_state = _entered;
         _;
@@ -475,6 +478,7 @@ contract ve is IERC721, IERC721Metadata {
     ///      Throws if `_owner` is the zero address. NFTs assigned to the zero address are considered invalid.
     /// @param _owner Address for whom to query the balance.
     function _balance(address _owner) internal view returns (uint) {
+        // _owner 当前拥有的 NFT 数量
         return ownerToNFTokenCount[_owner];
     }
 
@@ -678,7 +682,7 @@ contract ve is IERC721, IERC721Metadata {
     ) public {
         _transferFrom(_from, _to, _tokenId, msg.sender);
 
-        if (_isContract(_to)) {
+        if (_isContract(_to)) { // 若是发送给合约，合约需要实现 onERC721Received
             // Throws if transfer destination is a contract which does not implement 'onERC721Received'
             try IERC721Receiver(_to).onERC721Received(msg.sender, _from, _tokenId, _data) returns (bytes4) {} catch (
                 bytes memory reason
@@ -785,7 +789,9 @@ contract ve is IERC721, IERC721Metadata {
                 u_old.bias = u_old.slope * int128(int256(old_locked.end - block.timestamp));
             }
             if (new_locked.end > block.timestamp && new_locked.amount > 0) {
+                // 斜率是按最大 4 年来计算的，对于特定的 amount 来说，斜率是确定的
                 u_new.slope = new_locked.amount / iMAXTIME;
+                // 锁定时间越久，初始投票权数量越大
                 u_new.bias = u_new.slope * int128(int256(new_locked.end - block.timestamp));
             }
 
@@ -802,10 +808,12 @@ contract ve is IERC721, IERC721Metadata {
             }
         }
 
+        // 最近的检查点
         Point memory last_point = Point({bias: 0, slope: 0, ts: block.timestamp, blk: block.number});
         if (_epoch > 0) {
             last_point = point_history[_epoch];
         }
+        // 最近的检查点时刻
         uint last_checkpoint = last_point.ts;
         // initial_last_point is used for extrapolation to calculate block number
         // (approximately, for *At methods) and save them
@@ -813,21 +821,24 @@ contract ve is IERC721, IERC721Metadata {
         Point memory initial_last_point = last_point;
         uint block_slope = 0; // dblock/dt
         if (block.timestamp > last_point.ts) {
+            // 这里 MULTIPLIER 是为了放大结果而不因整除而损失精度
             block_slope = (MULTIPLIER * (block.number - last_point.blk)) / (block.timestamp - last_point.ts);
         }
         // If last point is already recorded in this block, slope=0
         // But that's ok b/c we know the block in such case
 
         // Go over weeks to fill history and calculate what the current point is
+        // 从上一个检查点开始分周段来填充检查点历史
         {
-            uint t_i = (last_checkpoint / WEEK) * WEEK;
+            uint t_i = (last_checkpoint / WEEK) * WEEK; // 最近的 epoch 的上个周四零点
             for (uint i = 0; i < 255; ++i) {
                 // Hopefully it won't happen that this won't get used in 5 years!
                 // If it does, users will be able to withdraw but vote weight will be broken
+                // 若此协议使用超过几年，用户可以提现，然而投票权数量正确性应该会被破坏
                 t_i += WEEK;
                 int128 d_slope = 0;
                 if (t_i > block.timestamp) {
-                    t_i = block.timestamp;
+                    t_i = block.timestamp; // 最多到此时此刻
                 } else {
                     d_slope = slope_changes[t_i];
                 }
@@ -843,9 +854,10 @@ contract ve is IERC721, IERC721Metadata {
                 }
                 last_checkpoint = t_i;
                 last_point.ts = t_i;
+                // 根据时刻推算区块号；平均了出块时间
                 last_point.blk = initial_last_point.blk + (block_slope * (t_i - initial_last_point.ts)) / MULTIPLIER;
-                _epoch += 1;
-                if (t_i == block.timestamp) {
+                _epoch += 1; // epoch 加一
+                if (t_i == block.timestamp) { // 直到此时此刻，才停止循环
                     last_point.blk = block.number;
                     break;
                 } else {
@@ -871,6 +883,7 @@ contract ve is IERC721, IERC721Metadata {
         }
 
         // Record the changed point into history
+        // 记录最近检查点
         point_history[_epoch] = last_point;
 
         if (_tokenId != 0) {
@@ -893,7 +906,7 @@ contract ve is IERC721, IERC721Metadata {
                 }
                 // else: we recorded it already in old_dslope
             }
-            // Now handle user history
+            // Now handle user history 记录 tokenId 的 user epoch 历史
             uint user_epoch = user_point_epoch[_tokenId] + 1;
 
             user_point_epoch[_tokenId] = user_epoch;
@@ -937,6 +950,8 @@ contract ve is IERC721, IERC721Metadata {
 
         address from = msg.sender;
         if (_value != 0 && deposit_type != DepositType.MERGE_TYPE) {
+            // 从交易发送者转账 $SOLID 到这个合约
+            // merge 情况下不用转账
             assert(IERC20(token).transferFrom(from, address(this), _value));
         }
 
@@ -949,11 +964,13 @@ contract ve is IERC721, IERC721Metadata {
         voter = _voter;
     }
 
+    // 投票
     function voting(uint _tokenId) external {
         require(msg.sender == voter);
         voted[_tokenId] = true;
     }
 
+    // 弃权，取消投票
     function abstain(uint _tokenId) external {
         require(msg.sender == voter);
         voted[_tokenId] = false;
@@ -969,6 +986,7 @@ contract ve is IERC721, IERC721Metadata {
         attachments[_tokenId] = attachments[_tokenId]-1;
     }
 
+    // 把 _from tokenId 合并到 _to tokenId；_from tokenId 就被销毁了
     function merge(uint _from, uint _to) external {
         require(attachments[_from] == 0 && !voted[_from], "attached");
         require(_from != _to);
@@ -991,6 +1009,7 @@ contract ve is IERC721, IERC721Metadata {
     }
 
     /// @notice Record global data to checkpoint
+    /// 重整检查点历史；长时间没有 deposit/withdraw 发生时，这个非常有用
     function checkpoint() external {
         _checkpoint(0, LockedBalance(0, 0), LockedBalance(0, 0));
     }
@@ -998,6 +1017,7 @@ contract ve is IERC721, IERC721Metadata {
     /// @notice Deposit `_value` tokens for `_tokenId` and add to the lock
     /// @dev Anyone (even a smart contract) can deposit for someone else, but
     ///      cannot extend their locktime and deposit for a brand new user
+    /// 不同于 increase_amount 的是，非 tokenId 的权限人也可以调用 deposit_for
     /// @param _tokenId lock NFT
     /// @param _value Amount to add to user's lock
     function deposit_for(uint _tokenId, uint _value) external nonreentrant {
@@ -1014,6 +1034,7 @@ contract ve is IERC721, IERC721Metadata {
     /// @param _lock_duration Number of seconds to lock tokens for (rounded down to nearest week)
     /// @param _to Address to deposit
     function _create_lock(uint _value, uint _lock_duration, address _to) internal returns (uint) {
+        // 将来的某个周四零点
         uint unlock_time = (block.timestamp + _lock_duration) / WEEK * WEEK; // Locktime is rounded down to weeks
 
         require(_value > 0); // dev: need non-zero value
@@ -1021,7 +1042,7 @@ contract ve is IERC721, IERC721Metadata {
         require(unlock_time <= block.timestamp + MAXTIME, 'Voting lock can be 4 years max');
 
         ++tokenId;
-        uint _tokenId = tokenId;
+        uint _tokenId = tokenId; // 新的 tokenId 是在最近的 tokenId 上加一
         _mint(_to, _tokenId);
 
         _deposit_for(_tokenId, _value, unlock_time, locked[_tokenId], DepositType.CREATE_LOCK_TYPE);
@@ -1044,6 +1065,7 @@ contract ve is IERC721, IERC721Metadata {
     }
 
     /// @notice Deposit `_value` additional tokens for `_tokenId` without modifying the unlock time
+    /// 为 tokenId 增加锁定的 $SOLID 数量
     /// @param _value Amount of tokens to deposit and add to the lock
     function increase_amount(uint _tokenId, uint _value) external nonreentrant {
         assert(_isApprovedOrOwner(msg.sender, _tokenId));
@@ -1058,6 +1080,7 @@ contract ve is IERC721, IERC721Metadata {
     }
 
     /// @notice Extend the unlock time for `_tokenId`
+    /// 为 tokenId 增加锁定的时间
     /// @param _lock_duration New number of seconds until tokens unlock
     function increase_unlock_time(uint _tokenId, uint _lock_duration) external nonreentrant {
         assert(_isApprovedOrOwner(msg.sender, _tokenId));
@@ -1073,8 +1096,8 @@ contract ve is IERC721, IERC721Metadata {
         _deposit_for(_tokenId, 0, unlock_time, _locked, DepositType.INCREASE_UNLOCK_TIME);
     }
 
-    /// @notice Withdraw all tokens for `_tokenId`
-    /// @dev Only possible if the lock has expired
+    /// @notice Withdraw all tokens for `_tokenId` 提现锁定的 $SOLID，销毁 tokenId
+    /// @dev Only possible if the lock has expired 达到锁定期后才可提现
     function withdraw(uint _tokenId) external nonreentrant {
         assert(_isApprovedOrOwner(msg.sender, _tokenId));
         require(attachments[_tokenId] == 0 && !voted[_tokenId], "attached");
@@ -1128,10 +1151,10 @@ contract ve is IERC721, IERC721Metadata {
         return _min;
     }
 
-    /// @notice Get the current voting power for `_tokenId`
+    /// @notice Get the current voting power for `_tokenId` 获取指定 tokenId 在指定时刻的投票权数量
     /// @dev Adheres to the ERC20 `balanceOf` interface for Aragon compatibility
-    /// @param _tokenId NFT for lock
-    /// @param _t Epoch time to return voting power at
+    /// @param _tokenId NFT for lock 指定 tokenId
+    /// @param _t Epoch time to return voting power at 指定时刻
     /// @return User voting power
     function _balanceOfNFT(uint _tokenId, uint _t) internal view returns (uint) {
         uint _epoch = user_point_epoch[_tokenId];
@@ -1162,7 +1185,7 @@ contract ve is IERC721, IERC721Metadata {
     }
 
     function balanceOfNFT(uint _tokenId) external view returns (uint) {
-        if (ownership_change[_tokenId] == block.number) return 0;
+        if (ownership_change[_tokenId] == block.number) return 0; // for Flash NFT protection
         return _balanceOfNFT(_tokenId, block.timestamp);
     }
 
@@ -1235,6 +1258,8 @@ contract ve is IERC721, IERC721Metadata {
     function _supply_at(Point memory point, uint t) internal view returns (uint) {
         Point memory last_point = point;
         uint t_i = (last_point.ts / WEEK) * WEEK;
+        // 计算从最后一个 point 的时刻到指定 t 时刻的投票权数量的衰减，这个 point 的 bias 减去它就是 t 时刻的投票权数量
+        // 考虑到 slope_changes 中的 slope 是按每周的变更量，所以分周段计算
         for (uint i = 0; i < 255; ++i) {
             t_i += WEEK;
             int128 d_slope = 0;
@@ -1257,7 +1282,7 @@ contract ve is IERC721, IERC721Metadata {
         return uint(uint128(last_point.bias));
     }
 
-    /// @notice Calculate total voting power
+    /// @notice Calculate total voting power 计算总投票权数量
     /// @dev Adheres to the ERC20 `totalSupply` interface for Aragon compatibility
     /// @return Total voting power
     function totalSupplyAtT(uint t) public view returns (uint) {
@@ -1266,6 +1291,7 @@ contract ve is IERC721, IERC721Metadata {
         return _supply_at(last_point, t);
     }
 
+    // 当前时刻的总投票权数量
     function totalSupply() external view returns (uint) {
         return totalSupplyAtT(block.timestamp);
     }
@@ -1305,6 +1331,7 @@ contract ve is IERC721, IERC721Metadata {
         output = string(abi.encodePacked('data:application/json;base64,', json));
     }
 
+    // 数字转为字符串
     function toString(uint value) internal pure returns (string memory) {
         // Inspired by OraclizeAPI's implementation - MIT license
         // https://github.com/oraclize/ethereum-api/blob/b42146b063c7d6ee1358846c198246239e9360e8/oraclizeAPI_0.4.25.sol

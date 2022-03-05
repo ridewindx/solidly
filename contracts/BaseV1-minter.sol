@@ -35,18 +35,18 @@ interface ve_dist {
 
 contract BaseV1Minter {
 
-    uint internal constant week = 86400 * 7; // allows minting once per week (reset every Thursday 00:00 UTC)
+    uint internal constant week = 86400 * 7; // allows minting once per week (reset every Thursday 00:00 UTC) 每周的秒数
     uint internal constant emission = 98;
     uint internal constant tail_emission = 2;
     uint internal constant target_base = 100; // 2% per week target emission
     uint internal constant tail_base = 1000; // 0.2% per week target emission
-    underlying public immutable _token;
-    voter public immutable _voter;
-    ve public immutable _ve;
+    underlying public immutable _token; // $SOLID 代币地址
+    voter public immutable _voter; // 投票合约的地址
+    ve public immutable _ve; // veNFT 合约的地址
     ve_dist public immutable _ve_dist;
     uint public weekly = 20000000e18;
     uint public active_period;
-    uint internal constant lock = 86400 * 7 * 52 * 4;
+    uint internal constant lock = 86400 * 7 * 52 * 4; // 4 年时间，注意是取了 52 整周
 
     address internal initializer;
 
@@ -62,7 +62,7 @@ contract BaseV1Minter {
         _voter = voter(__voter);
         _ve = ve(__ve);
         _ve_dist = ve_dist(__ve_dist);
-        active_period = (block.timestamp + (2*week)) / week * week;
+        active_period = (block.timestamp + (2*week)) / week * week; // 恰好是 2 周后的周四零点
     }
 
     function initialize(
@@ -77,49 +77,62 @@ contract BaseV1Minter {
             _ve.create_lock_for(amounts[i], lock, claimants[i]);
         }
         initializer = address(0);
-        active_period = (block.timestamp + week) / week * week;
+        active_period = (block.timestamp + week) / week * week; // 1 周后的周四零点
     }
 
     // calculate circulating supply as total token supply - locked supply
+    // $SOLID 代币的流通量 = $SOLID 总发行量 - veNFT 合约中的投票权数量（缩水版的锁定 $SOLID 量）
     function circulating_supply() public view returns (uint) {
         return _token.totalSupply() - _ve.totalSupply();
     }
 
     // emission calculation is 2% of available supply to mint adjusted by circulating / total supply
+    // 计算本周应发射的 $SOLID 数量
     function calculate_emission() public view returns (uint) {
+        // weekly * 98% * 流通量/总已发行量
+        // weekly 应当是上周发射的 $SOLID 量
+        // 98% 表示新发射数量比上周发射数量减少 2%
+        // 但又受到本周流通量百分比的影响
+        // 流通量越大（ve 中锁定越少），发射越多，相当于没有在 ve 中锁定的持币者的持币价值被稀释越多
         return weekly * emission * circulating_supply() / target_base / _token.totalSupply();
     }
 
     // weekly emission takes the max of calculated (aka target) emission versus circulating tail end emission
+    // 综合上周发射数量、本周流通量百分比、最少为流通量的 0.2%，计算本周应发射 $SOLID 数量
     function weekly_emission() public view returns (uint) {
+        // 每周最少发射 $SOLID 代币流通量的 0.2%
         return Math.max(calculate_emission(), circulating_emission());
     }
 
     // calculates tail end (infinity) emissions as 0.2% of total supply
+    // $SOLID 代币流通量的 0.2%
     function circulating_emission() public view returns (uint) {
         return circulating_supply() * tail_emission / tail_base;
     }
 
     // calculate inflation and adjust ve balances accordingly
     function calculate_growth(uint _minted) public view returns (uint) {
+        // 对于指定每周发射数量，多增发一些，多出来的百分比为投票权数量占 $SOLID 发行量的比例
         return _ve.totalSupply() * _minted / _token.totalSupply();
     }
 
     // update period can only be called once per cycle (1 week)
+    // initialize 后每周可以调用一次
     function update_period() external returns (uint) {
         uint _period = active_period;
         if (block.timestamp >= _period + week && initializer == address(0)) { // only trigger if new week
-            _period = block.timestamp / week * week;
+            _period = block.timestamp / week * week; // 之前最近的周四零点
             active_period = _period;
-            weekly = weekly_emission();
+            weekly = weekly_emission(); // 计算本周应发射的 $SOLID 数量
 
             uint _growth = calculate_growth(weekly);
             uint _required = _growth + weekly;
             uint _balanceOf = _token.balanceOf(address(this));
             if (_balanceOf < _required) {
-                _token.mint(address(this), _required-_balanceOf);
+                _token.mint(address(this), _required-_balanceOf); // $SOLID 不足，就 mint
             }
 
+            // 把多增发的 $SOLID 转账给分发合约，分给 ve token 持有者
             require(_token.transfer(address(_ve_dist), _growth));
             _ve_dist.checkpoint_token(); // checkpoint token balance that was just minted in ve_dist
             _ve_dist.checkpoint_total_supply(); // checkpoint supply

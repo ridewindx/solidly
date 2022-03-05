@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 pragma solidity 0.8.11;
 
+// $SOLID ERC20 代币合约
 contract BaseV1 {
 
     string public constant symbol = "SOLID";
@@ -60,7 +61,7 @@ contract BaseV1 {
     }
 
     function mint(address account, uint amount) external returns (bool) {
-        require(msg.sender == minter);
+        require(msg.sender == minter); // 只能由 minter 来铸造
         _mint(account, amount);
         return true;
     }

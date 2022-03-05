@@ -27,25 +27,27 @@ interface IBaseV1Voter {
 }
 
 // Bribes pay out rewards for a given pool based on the votes that were received from the user (goes hand in hand with BaseV1Gauges.vote())
+// gauge 收取特定 pool 的交易费用（1/10000）
+// 用户对特定 pool 的投票数量占这个 pool 得到的所有投票数量的比例，决定用户可以从费用中获得多少
 contract Bribe {
 
-    address public immutable factory; // only factory can modify balances (since it only happens on vote())
+    address public immutable factory; // voter 合约 only factory can modify balances (since it only happens on vote())
     address public immutable _ve;
 
     uint public constant DURATION = 7 days; // rewards are released over 7 days
     uint public constant PRECISION = 10 ** 18;
 
     // default snx staking contract implementation
-    mapping(address => uint) public rewardRate;
-    mapping(address => uint) public periodFinish;
-    mapping(address => uint) public lastUpdateTime;
-    mapping(address => uint) public rewardPerTokenStored;
+    mapping(address => uint) public rewardRate; // token -> reward rate 每秒奖励 token 的数量
+    mapping(address => uint) public periodFinish; // token -> period finish time 奖励 token 的到期时间
+    mapping(address => uint) public lastUpdateTime; // token -> last update time
+    mapping(address => uint) public rewardPerTokenStored; // token -> its reward amount
 
-    mapping(address => mapping(uint => uint)) public lastEarn;
+    mapping(address => mapping(uint => uint)) public lastEarn;  // token -> nft tokenId -> last getReward time
     mapping(address => mapping(uint => uint)) public userRewardPerTokenStored;
 
-    address[] public rewards;
-    mapping(address => bool) public isReward;
+    address[] public rewards; // 奖励 token 列表
+    mapping(address => bool) public isReward; // token -> true/false
 
     uint public totalSupply;
     mapping(uint => uint) public balanceOf;
@@ -65,21 +67,21 @@ contract Bribe {
     /// @notice A checkpoint for marking supply
     struct SupplyCheckpoint {
         uint timestamp;
-        uint supply;
+        uint supply; // totalSupply
     }
 
     /// @notice A record of balance checkpoints for each account, by index
-    mapping (uint => mapping (uint => Checkpoint)) public checkpoints;
+    mapping (uint => mapping (uint => Checkpoint)) public checkpoints; // user -> checkpoint index -> checkpoint
     /// @notice The number of checkpoints for each account
-    mapping (uint => uint) public numCheckpoints;
+    mapping (uint => uint) public numCheckpoints; // user -> num of checkpoints
     /// @notice A record of balance checkpoints for each token, by index
-    mapping (uint => SupplyCheckpoint) public supplyCheckpoints;
+    mapping (uint => SupplyCheckpoint) public supplyCheckpoints; // index -> supply checkpoint
     /// @notice The number of checkpoints
     uint public supplyNumCheckpoints;
     /// @notice A record of balance checkpoints for each token, by index
-    mapping (address => mapping (uint => RewardPerTokenCheckpoint)) public rewardPerTokenCheckpoints;
+    mapping (address => mapping (uint => RewardPerTokenCheckpoint)) public rewardPerTokenCheckpoints; // token -> checkpoint index -> checkpoint
     /// @notice The number of checkpoints for each token
-    mapping (address => uint) public rewardPerTokenNumCheckpoints;
+    mapping (address => uint) public rewardPerTokenNumCheckpoints; // token -> num of checkpoints
 
     event Deposit(address indexed from, uint tokenId, uint amount);
     event Withdraw(address indexed from, uint tokenId, uint amount);
@@ -93,7 +95,7 @@ contract Bribe {
 
     // simple re-entrancy check
     uint internal _unlocked = 1;
-    modifier lock() {
+    modifier lock() { // 防可重入锁
         require(_unlocked == 1);
         _unlocked = 2;
         _;
@@ -248,6 +250,7 @@ contract Bribe {
     }
 
     // allows a user to claim rewards for a given token
+    // 发送者必须是 tokenId 的拥有者或操作者，可以申领指定 token 列表的奖励
     function getReward(uint tokenId, address[] memory tokens) external lock  {
         require(ve(_ve).isApprovedOrOwner(msg.sender, tokenId));
         for (uint i = 0; i < tokens.length; i++) {
@@ -263,6 +266,7 @@ contract Bribe {
     }
 
     // used by BaseV1Voter to allow batched reward claims
+    // 和 getReward 类似，只是由 voter 调用，把奖励转给 tokenId 的 owner
     function getRewardForOwner(uint tokenId, address[] memory tokens) external lock  {
         require(msg.sender == factory);
         address _owner = ve(_ve).ownerOf(tokenId);
@@ -272,7 +276,7 @@ contract Bribe {
             uint _reward = earned(tokens[i], tokenId);
             lastEarn[tokens[i]][tokenId] = block.timestamp;
             userRewardPerTokenStored[tokens[i]][tokenId] = rewardPerTokenStored[tokens[i]];
-            if (_reward > 0) _safeTransfer(tokens[i], _owner, _reward);
+            if (_reward > 0) _safeTransfer(tokens[i], _owner, _reward); // 转账奖励
 
             emit ClaimRewards(_owner, tokens[i], _reward);
         }
@@ -285,6 +289,7 @@ contract Bribe {
         return rewardPerTokenStored[token] + ((lastTimeRewardApplicable(token) - Math.min(lastUpdateTime[token], periodFinish[token])) * rewardRate[token] * PRECISION / totalSupply);
     }
 
+    // 为指定 token 计算 rewardPerToken 的检查点历史
     function batchRewardPerToken(address token, uint maxRuns) external {
         (rewardPerTokenStored[token], lastUpdateTime[token])  = _batchRewardPerToken(token, maxRuns);
     }
@@ -362,6 +367,7 @@ contract Bribe {
         return (reward, _startTimestamp);
     }
 
+    // 新挣指定 tokenId 指定 token 的奖励数额
     function earned(address token, uint tokenId) public view returns (uint) {
         uint _startTimestamp = Math.max(lastEarn[token][tokenId], rewardPerTokenCheckpoints[token][0].timestamp);
         if (numCheckpoints[tokenId] == 0) {
@@ -391,6 +397,7 @@ contract Bribe {
     }
 
     // This is an external function, but internal notation is used since it can only be called "internally" from BaseV1Gauges
+    // 由 voter 合约调用，amount 是投票数量，用作分取贿赂的份额比例
     function _deposit(uint amount, uint tokenId) external {
         require(msg.sender == factory);
         totalSupply += amount;
@@ -413,6 +420,7 @@ contract Bribe {
         emit Withdraw(msg.sender, tokenId, amount);
     }
 
+    // 指定 token 的奖励还剩的数量
     function left(address token) external view returns (uint) {
         if (block.timestamp >= periodFinish[token]) return 0;
         uint _remaining = periodFinish[token] - block.timestamp;
@@ -420,6 +428,7 @@ contract Bribe {
     }
 
     // used to notify a gauge/bribe of a given reward, this can create griefing attacks by extending rewards
+    // 由 gauge 调用，把 pool 的交易费用（1/10000）存入，用作贿赂奖励
     function notifyRewardAmount(address token, uint amount) external lock {
         require(amount > 0);
         if (rewardRate[token] == 0) _writeRewardPerTokenCheckpoint(token, 0, block.timestamp);

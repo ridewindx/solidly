@@ -57,9 +57,9 @@ interface IWFTM {
 contract BaseV1Router01 {
 
     struct route {
-        address from;
-        address to;
-        bool stable;
+        address from; // tokenIn
+        address to; // tokenOut
+        bool stable; // 是否为稳定币
     }
 
     address public immutable factory;
@@ -94,7 +94,7 @@ contract BaseV1Router01 {
         pair = address(uint160(uint256(keccak256(abi.encodePacked(
             hex'ff',
             factory,
-            keccak256(abi.encodePacked(token0, token1, stable)),
+            keccak256(abi.encodePacked(token0, token1, stable)), // `stable` 参与计算 pair 的地址
             pairCodeHash // init code hash
         )))));
     }
@@ -413,7 +413,7 @@ contract BaseV1Router01 {
     returns (uint[] memory amounts)
     {
         require(routes[0].from == address(wftm), 'BaseV1Router: INVALID_PATH');
-        amounts = getAmountsOut(msg.value, routes);
+        amounts = getAmountsOut(msg.value, routes); // sender 必须发送特定数量的 FTM
         require(amounts[amounts.length - 1] >= amountOutMin, 'BaseV1Router: INSUFFICIENT_OUTPUT_AMOUNT');
         wftm.deposit{value: amounts[0]}();
         assert(wftm.transfer(pairFor(routes[0].from, routes[0].to, routes[0].stable), amounts[0]));
